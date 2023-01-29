@@ -9,7 +9,7 @@ You need [esp-idf v5.0](https://docs.espressif.com/projects/esp-idf/en/release-v
 Add the line below to your `build_config.rb`:
 
 ```ruby
-  conf.gem :github => 'yuuu/mruby-esp32-mqtt'
+  conf.gem :github => 'mruby-esp32/mruby-esp32-mqtt'
 ```
 
 In addition, you may need to add `mqtt` to the component linking mruby.
