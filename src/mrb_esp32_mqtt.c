@@ -31,7 +31,31 @@ typedef struct mqtt_client_t {
   mrb_bool ssl;
   esp_mqtt_client_handle_t client;
   QueueHandle_t queue;
+  TaskHandle_t main_task_handle;
+  mrb_value message_proc;  
 } mqtt_client_t;
+
+static void
+mqtt_message_handler(mqtt_client_t *client, esp_mqtt_event_handle_t event) {
+  // Suspend main task.
+  vTaskSuspend(client->main_task_handle);
+  int arena_index = mrb_gc_arena_save(client->mrb);
+
+  // Check message_proc is a a proc?
+  mrb_assert(mrb_type(client->message_proc) == MRB_TT_PROC);
+
+  // Prep arguments to pass.
+  mrb_value args[2];
+  args[0] = mrb_str_new_static(client->mrb, event->topic, event->topic_len);
+  args[1] = mrb_str_new_static(client->mrb, event->data,  event->data_len); 
+
+  // Call message_proc.
+  mrb_yield_argv(client->mrb, client->message_proc, 2, &args[0]);
+
+  // Resume main task.
+  mrb_gc_arena_restore(client->mrb, arena_index);
+  vTaskResume(client->main_task_handle);
+}
 
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data)
 {
@@ -61,7 +85,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
       break;
   case MQTT_EVENT_DATA:
       ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-      xQueueSend(client->queue, event_data, (TickType_t)0);
+      mqtt_message_handler(client, event);
       break;
   case MQTT_EVENT_ERROR:
       ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -89,17 +113,6 @@ mqtt_wait_for_event(mrb_state *mrb, mrb_value self, int32_t event_id) {
 }
 
 static void
-mqtt_wait_for_data(mrb_state *mrb, mrb_value self, esp_mqtt_event_t *event) {
-  mqtt_client_t *client = (mqtt_client_t *) DATA_PTR(self);
-
-  while(true) {
-    if(xQueueReceive(client->queue, (void*)event, (TickType_t)(1000 / portTICK_PERIOD_MS))) {
-      if(event->event_id == MQTT_EVENT_DATA) break;
-    }
-  }
-}
-
-static void
 mrb_mqtt_client_free(mrb_state *mrb, void *p) {
   mqtt_client_t *client = (mqtt_client_t *)p;
 
@@ -110,13 +123,14 @@ mrb_mqtt_client_free(mrb_state *mrb, void *p) {
 }
 
 static mrb_value
-mrb_mqtt_client_init(mrb_state *mrb, mrb_value self) {
+mrb_mqtt_client_initialize(mrb_state *mrb, mrb_value self) {
   mqtt_client_t *client = mrb_malloc(mrb, sizeof(mqtt_client_t));
 
   mrb_value host;
   mrb_int port;
+  mrb_value block;
 
-  mrb_get_args(mrb, "Si", &host, &port);
+  mrb_get_args(mrb, "Si&", &host, &port, &block);
 
   client->mrb = mrb;
   client->host = mrb_malloc(mrb, strlen(mrb_str_to_cstr(mrb, host)));
@@ -124,6 +138,11 @@ mrb_mqtt_client_init(mrb_state *mrb, mrb_value self) {
   client->port = port;
   client->ssl = FALSE;
   client->queue = xQueueCreate(WAIT_EVENT_QUEUE_LEN, sizeof(esp_mqtt_event_t));
+
+  // Save block given and main task for handling incoming messages.
+  mrb_iv_set(mrb, self, mrb_intern_lit(mrb, "@message_proc"), block);
+  client->message_proc = block;
+  client->main_task_handle = xTaskGetCurrentTaskHandle();
 
   mrb_data_init(self, client, &mrb_mqtt_client);
   ESP_LOGI(TAG, "initialize(%s, %d)", client->host, client->port);
@@ -271,24 +290,6 @@ mrb_mqtt_client_unsubscribe(mrb_state *mrb, mrb_value self) {
 }
 
 static mrb_value
-mrb_mqtt_client_get(mrb_state *mrb, mrb_value self) {
-  esp_mqtt_event_t event;
-  
-  mqtt_wait_for_data(mrb, self, &event);
-
-  mrb_value topic = mrb_str_new_static(mrb, event.topic, event.topic_len);
-  mrb_value message = mrb_str_new_static(mrb, event.data, event.data_len);
-
-  mrb_value ary = mrb_ary_new(mrb);
-  mrb_ary_push(mrb, ary, topic);
-  mrb_ary_push(mrb, ary, message);
-
-  ESP_LOGI(TAG, "get()");
-
-  return ary;
-}
-
-static mrb_value
 mrb_mqtt_client_disconnect(mrb_state *mrb, mrb_value self) {
   mqtt_client_t *client = (mqtt_client_t *) DATA_PTR(self);
   int ret = ESP_FAIL;
@@ -312,13 +313,12 @@ mrb_mruby_esp32_mqtt_gem_init(mrb_state* mrb) {
   struct RClass *mqtt_module = mrb_define_module_under(mrb, esp32_module, "MQTT");
   struct RClass *client_class = mrb_define_class_under(mrb, mqtt_module, "Client", mrb->object_class);
 
-  mrb_define_method(mrb, client_class, "initialize", mrb_mqtt_client_init, MRB_ARGS_REQ(2));
+  mrb_define_method(mrb, client_class, "_initialize", mrb_mqtt_client_initialize, MRB_ARGS_REQ(2)|MRB_ARGS_BLOCK());
   mrb_define_method(mrb, client_class, "ssl=", mrb_mqtt_client_set_ssl, MRB_ARGS_REQ(1));
   mrb_define_method(mrb, client_class, "connect", mrb_mqtt_client_connect, MRB_ARGS_NONE());
   mrb_define_method(mrb, client_class, "publish", mrb_mqtt_client_publish, MRB_ARGS_REQ(2));
-  mrb_define_method(mrb, client_class, "subscribe", mrb_mqtt_client_subscribe, MRB_ARGS_REQ(1));
+  mrb_define_method(mrb, client_class, "_subscribe", mrb_mqtt_client_subscribe, MRB_ARGS_REQ(1));
   mrb_define_method(mrb, client_class, "unsubscribe", mrb_mqtt_client_unsubscribe, MRB_ARGS_REQ(1));
-  mrb_define_method(mrb, client_class, "get", mrb_mqtt_client_get, MRB_ARGS_NONE());
   mrb_define_method(mrb, client_class, "disconnect", mrb_mqtt_client_disconnect, MRB_ARGS_NONE());
 
   mrb_define_class_under(mrb, mqtt_module, "TimeoutError", mrb->eStandardError_class);

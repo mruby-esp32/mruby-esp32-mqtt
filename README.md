@@ -52,11 +52,22 @@ Publish message to topic.
 mqtt.publish("topic", 'message')
 ```
 
-Subscribe to topic and get message.
+Subscribe to one or more topics to receive messages. Received messages are event driven. For each message, the main mruby task pauses temporarily, allowing the block given for the receiving topic to run.
 
 ```ruby
-mqtt.subscribe("topic")
-topic, message = mqtt.get
+mqtt.subscribe("topic1") do |message|
+  puts "Received from topic1: #{message}"
+end
+
+mqtt.on_message_from("topic2") do |message|
+  puts "New message from topic2: #{message}"
+end
+mqtt.subscribe("topic2")
+
+loop do
+  # Do whatever in your main loop.
+  ESP32::System.delay(1000)
+end
 ```
 
 Disconnect.
