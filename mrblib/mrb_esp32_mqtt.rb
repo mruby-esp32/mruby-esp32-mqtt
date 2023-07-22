@@ -20,10 +20,6 @@ module ESP32
       def on_message_from(topic, &block)
         @callbacks[topic] = block if block
       end
-
-      def update(topic, message)
-        @callbacks[topic].call(message) if @callbacks[topic]
-      end
     end
   end
 end
