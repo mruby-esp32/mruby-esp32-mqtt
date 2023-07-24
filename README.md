@@ -49,6 +49,9 @@ mqtt.connect
 Publish message to topic.
 
 ```ruby
+while !mqtt.connected do
+  ESP32::System.delay(100)
+end
 mqtt.publish("topic", 'message')
 ```
 
